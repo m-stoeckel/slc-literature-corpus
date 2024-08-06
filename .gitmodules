@@ -1,0 +1,7 @@
+[submodule "stackpointer"]
+	path = deps/NeuroNLP2
+	url = git@github.com:m-stoeckel/NeuroNLP2.git
+
+[submodule "towerparse"]
+	path = deps/towerparse
+	url = git@github.com:m-stoeckel/towerparse.git
