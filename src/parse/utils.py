@@ -89,6 +89,17 @@ def get_parser(pattern: str):
         default=1.0,
     )
 
+    parser.add_argument(
+        "--min_sentence_len",
+        type=int,
+        default=-1,
+    )
+    parser.add_argument(
+        "--max_sentence_len",
+        type=int,
+        default=200,
+    )
+
     return parser
 
 

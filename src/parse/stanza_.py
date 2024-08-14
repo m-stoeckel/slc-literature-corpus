@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -50,8 +51,24 @@ class StanzaRunner(ParserABC):
             processors (str, optional): The processors to use. Defaults to "tokenize,mwt,pos,lemma,depparse".
             device (str | torch.device, optional): The device to run the pipeline on. Defaults to "cpu".
             batch_size (int, optional): The batch size for POS and dependency parsing. Defaults to 5000.
+            min_sentence_len (int, optional): The minimum sentence length to retain. Set to -1 (default) to disable.
+            max_sentence_len (int, optional): The maximum sentence length to retain. Set to -1 (default) to disable.
+            drop_filtered (bool, optional): Whether to drop the filtered sentences. Defaults to False.
         """
         super().__init__(language=language, device=device)
+
+        if not processors.startswith("tokenize,mwt"):
+            if "tokenize" not in processors:
+                processors = "tokenize,mwt," + processors
+                logging.warning(
+                    f"Prepending 'tokenize,mwt,' processors to: {processors}"
+                )
+            else:
+                raise ValueError(
+                    f"Expected processors to start with 'tokenize,mwt', got: {processors}"
+                )
+        self.processors = processors
+        self.processors_no_tk = processors.removeprefix("tokenize,mwt").strip(",")
 
         self.pipeline = Pipeline(
             lang=language,
@@ -62,16 +79,56 @@ class StanzaRunner(ParserABC):
             pos_batch_size=batch_size,
             depparse_batch_size=batch_size,
         )
+        self.min_sentence_len = min_sentence_len
+        self.max_sentence_len = max_sentence_len
+        self.drop_filtered = drop_filtered
 
     def read(self, path: Path) -> Document:
         return ConllFileHelper.read_stanza(path)
 
+    def filter(
+        self,
+        document: Document,
+    ) -> Document:
+        """
+        Filter the sentences in a document based on their length.
+        If neither `min_sentence_len` nor `max_sentence_len` are set, the original document is returned.
+        To retain references to the original sentences, all subsequent processing must NOT contain 'tokenize,mwt' processors.
+
+        Args:
+            document (Document): The document to filter.
+
+        Returns:
+            Document: A new `Document` object containing references to the filtered sentences.
+        """
+        if self.min_sentence_len < 0 and self.max_sentence_len < 0:
+            return document
+
+        filtered = Document([])
+        for sentence in document.sentences:
+            if (
+                self.min_sentence_len > 0
+                and len(sentence.words) >= self.min_sentence_len
+            ) or (
+                self.max_sentence_len > 0
+                and len(sentence.words) <= self.max_sentence_len
+            ):
+                filtered.sentences.append(sentence)
+        filtered._count_words()
+        return filtered
+
     def parse(self, path: Path, out: Path):
-        document: Document = self.read(path)
-        document = self.pipeline(filtered)
+        document: Document = self.pipeline(self.read(path), processors="tokenize,mwt")
+        filtered: Document = self.filter(document)
+
+        if self.processors_no_tk:
+            self.pipeline(filtered, processors=self.processors_no_tk)
 
         out.parent.mkdir(parents=True, exist_ok=True)
-        ConllFileHelper.write_stanza(document, out)
+        if not self.drop_filtered:
+            ConllFileHelper.write_stanza(document, out)
+        else:
+            ConllFileHelper.write_stanza(filtered, out)
 
 
 class ParserWithStanzaPreProcessor(StanzaRunner):
