@@ -8,7 +8,6 @@ class StackPointerActor(StackPointerRunner):
     def __init__(
         self,
         *args,
-        quiet: bool = True,
         **kwargs,
     ):
-        super().__init__(*args, **kwargs, quiet=quiet)
+        super().__init__(*args, **kwargs.setdefault("quiet", True))
