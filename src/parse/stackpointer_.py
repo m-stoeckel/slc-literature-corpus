@@ -3,10 +3,12 @@ from pathlib import Path
 from typing import Final, Generator, Literal, NamedTuple
 
 import numpy as np
-import pgzip
 import torch
 from attr import dataclass
-from conllu import Metadata, Token, TokenList
+from conllu import Metadata
+from stanza.models.common.doc import Document as StanzaDocument
+from stanza.models.common.doc import Sentence as StanzaSentence
+from stanza.models.common.doc import Word as StanzaWord
 from tqdm import tqdm
 
 from neuronlp2.io import conllx_data
@@ -21,8 +23,8 @@ from neuronlp2.io.common import (
     ROOT_POS,
 )
 from neuronlp2.models import StackPtrNet
-from parse.abc import ParserABC
-from parse.utils import EMPTY_CONLLU_TOKEN, ConllFileHelper, handle_contractions
+from parse.stanza_ import ParserWithStanzaPreProcessor
+from parse.utils import ConllFileHelper
 
 BASE_PATH: Final[Path] = Path.cwd().parent / "models/stackpointer/"
 
@@ -41,27 +43,19 @@ class DataPoint(NamedTuple):
     word_ids: list[int]
     char_seq_ids: list[list[int]]
     pos_ids: list[int]
-    forms: list[str]
-    lemmata: list[str]
-    metadata: dict | Metadata
-
-    @classmethod
-    def new(cls):
-        return cls([0], [[1]], [1], [], [], {})
+    sentence: StanzaSentence
 
 
 @dataclass
 class StackedData:
-    WORD: np.ndarray
-    CHAR: np.ndarray
-    POS: np.ndarray
-    MASK_ENC: np.ndarray
-    LENGTH: np.ndarray
-    FORM: list[list[str]]
-    LEMMA: list[list[str]]
-    META: list[Metadata]
+    word_ids: np.ndarray
+    char_seq_ids: np.ndarray
+    pos_ids: np.ndarray
+    mask_enc: np.ndarray
+    lengths: list[int]
+    sentences: list[StanzaSentence]
 
-    def __getitem__(self, key) -> np.ndarray | list[Metadata]:
+    def __getitem__(self, key) -> np.ndarray | list[int] | list[StanzaSentence]:
         if not hasattr(self, key):
             raise KeyError(key)
         return getattr(self, key)
@@ -69,14 +63,12 @@ class StackedData:
 
 @dataclass
 class TensorData:
-    WORD: torch.Tensor
-    CHAR: torch.Tensor
-    POS: torch.Tensor
-    MASK_ENC: torch.Tensor
-    LENGTH: torch.Tensor
-    FORM: list[list[str]]
-    LEMMA: list[list[str]]
-    META: list[Metadata]
+    word_ids: torch.Tensor
+    char_seq_ids: torch.Tensor
+    pos_ids: torch.Tensor
+    mask_enc: torch.Tensor
+    lengths: list[int]
+    sentences: list[StanzaSentence]
 
     def __getitem__(self, key) -> torch.Tensor | list[Metadata]:
         if not hasattr(self, key):
@@ -84,27 +76,37 @@ class TensorData:
         return getattr(self, key)
 
     def to(self, device: str | torch.device) -> "TensorData":
-        self.WORD = self.WORD.to(device)
-        self.CHAR = self.CHAR.to(device)
-        self.POS = self.POS.to(device)
-        self.MASK_ENC = self.MASK_ENC.to(device)
-        self.LENGTH = self.LENGTH.to(device)
+        self.word_ids = self.word_ids.to(device)
+        self.char_seq_ids = self.char_seq_ids.to(device)
+        self.pos_ids = self.pos_ids.to(device)
+        self.mask_enc = self.mask_enc.to(device)
         return self
 
 
-class StackPointerRunner(ParserABC):
+class StackPointerRunner(ParserWithStanzaPreProcessor):
     def __init__(
         self,
         language: Literal["en", "de"] = "en",
-        device: str | torch.device = "cpu",
         batch_size: int = 128,
         beam: int = 1,
         base_path: Path = BASE_PATH,
         quiet: bool = False,
+        preprocess: bool = True,
+        device: str | torch.device = "cpu",
+        **kwargs,
     ):
-        self.device = torch.device(device)
-        if self.device.type == "cuda" and not torch.cuda.is_available():
-            raise ValueError("device.type == 'cuda', but no GPU is available")
+        super().__init__(
+            language=language,
+            preprocess=preprocess,
+            device=device,
+            **(
+                {
+                    "processors": "tokenize,mwt,pos,lemma",
+                    "preprocess_device": device,
+                }
+                | kwargs
+            ),
+        )
 
         self.batch_size = batch_size
         self.beam = beam
@@ -156,12 +158,12 @@ class StackPointerRunner(ParserABC):
         self.nlp.eval()
 
     def parse(self, path: Path, out: Path):
-        sentences = self.read(path)
+        document, datapoints = self.read(path)
 
         out.parent.mkdir(parents=True, exist_ok=True)
-        annotated = []
+        # annotated = []  # FIXME: Check if this works
         with tqdm(
-            total=len(sentences),
+            total=len(datapoints),
             desc=f"Parsing: {path.name}",
             position=1,
             leave=False,
@@ -170,99 +172,66 @@ class StackPointerRunner(ParserABC):
             disable=self.quiet,
         ) as tq:
             for batch in iterate_batch(
-                self.stack(sentences),
-                len(sentences),
+                self.stack(datapoints),
+                len(datapoints),
                 self.batch_size,
             ):
                 with torch.no_grad():
                     batch_d = batch.to(self.device)
                     heads, types = self.nlp.decode(
-                        batch_d.WORD,
-                        batch_d.CHAR,
-                        batch_d.POS,
-                        mask=batch_d.MASK_ENC,
+                        batch_d.word_ids,
+                        batch_d.char_seq_ids,
+                        batch_d.pos_ids,
+                        mask=batch_d.mask_enc,
                         beam=self.beam,
                     )
-                batch = batch_d.to("cpu")
 
-                for i, length in enumerate(batch.LENGTH.numpy()):
+                for i, (length, sentence) in enumerate(
+                    zip(batch.lengths, batch.sentences)
+                ):
                     sample_heads = heads[i][1 : length + 1]
                     sample_types = types[i][1 : length + 1]
-                    sample_meta = batch.META[i]
 
-                    annotated.append(
-                        TokenList(
-                            [
-                                Token(
-                                    EMPTY_CONLLU_TOKEN
-                                    | {
-                                        "id": index,
-                                        "form": form,
-                                        "lemma": lemma,
-                                        "head": governor,
-                                        "deprel": self.type_alphabet.get_instance(
-                                            relation
-                                        ),
-                                    }
-                                )
-                                for index, (
-                                    form,
-                                    lemma,
-                                    governor,
-                                    relation,
-                                ) in enumerate(
-                                    zip(
-                                        batch.FORM[i],
-                                        batch.LEMMA[i],
-                                        sample_heads,
-                                        sample_types,
-                                    ),
-                                    start=1,
-                                )
-                            ],
-                            metadata=sample_meta,
-                        )
-                    )
+                    for word, governor, relation in zip(
+                        sentence.words, sample_heads, sample_types
+                    ):
+                        word: StanzaWord
+                        word.head = governor
+                        word.deprel = relation
 
-                    tq.update(batch.WORD.size(0))
+                    tq.update(batch.word_ids.size(0))
 
-            with pgzip.open(out, "wt", encoding="utf-8") as fp:
-                fp.writelines(sentence.serialize() for sentence in annotated)  # type: ignore
+            ConllFileHelper.write_stanza(document, out)
 
         return True
 
-    def read(self, path: Path) -> list[DataPoint]:
-        document: list[TokenList] = [
-            handle_contractions(sentence, expand=True)
-            for sentence in ConllFileHelper.read(path)
-        ]
+    def read(self, path: Path) -> tuple[StanzaDocument, list[DataPoint]]:
+        document: StanzaDocument = super().read(path)
+
         data_points: list[DataPoint] = []
-        for sentence in document:
+        for sentence in document.sentences:
             dp = DataPoint(
                 word_ids=[self.word_alphabet.get_index(ROOT)],
                 char_seq_ids=[[self.char_alphabet.get_index(ROOT_CHAR)]],
                 pos_ids=[self.pos_alphabet.get_index(ROOT_POS)],
-                forms=[token["form"] for token in sentence],
-                lemmata=[token["lemma"] for token in sentence],
-                metadata=getattr(sentence, "metadata", None) or {},
+                sentence=sentence,
             )
-            for token in sentence:
+
+            for word in sentence.words:
                 dp.char_seq_ids.append(
                     [
                         self.char_alphabet.get_index(char)
-                        for char in token["form"][:MAX_CHAR_LENGTH]
+                        for char in word.text[:MAX_CHAR_LENGTH]
                     ]
                 )
 
                 dp.word_ids.append(
-                    self.word_alphabet.get_index(DIGIT_RE.sub("0", token["form"]))
+                    self.word_alphabet.get_index(DIGIT_RE.sub("0", word.text))
                 )
 
-                dp.pos_ids.append(
-                    self.pos_alphabet.instance2index.get(token["xpos"], 0)
-                )
+                dp.pos_ids.append(self.pos_alphabet.instance2index.get(word.xpos, 0))
             data_points.append(dp)
-        return data_points
+        return document, data_points
 
     def stack(
         self,
@@ -285,19 +254,15 @@ class StackPointerRunner(ParserABC):
         pid_inputs = np.full([data_size, max_sent_l], PAD_ID_TAG, dtype=np.int64)
 
         masks_e = np.zeros([data_size, max_sent_l], dtype=np.float32)
-        lengths = np.empty(data_size, dtype=np.int64)
 
-        forms = []
-        lemmata = []
-        metadata = []
+        lengths = []
+        sentences = []
 
         for i, (
             wids,
             cid_seqs,
             pids,
-            form,
-            lemma,
-            meta,
+            sentence,
         ) in enumerate(data):
             length = len(wids)
             wid_inputs[i, :length] = wids
@@ -305,21 +270,17 @@ class StackPointerRunner(ParserABC):
                 cid_inputs[i, c, : len(cids)] = cids
             pid_inputs[i, :length] = pids
             masks_e[i, :length] = 1.0
-            lengths[i] = length
 
-            forms.append(form)
-            lemmata.append(lemma)
-            metadata.append(meta)
+            lengths.append(length)
+            sentences.append(sentence)
 
         return StackedData(
-            WORD=wid_inputs,
-            CHAR=cid_inputs,
-            POS=pid_inputs,
-            MASK_ENC=masks_e,
-            LENGTH=lengths,
-            FORM=forms,
-            LEMMA=lemmata,
-            META=metadata,
+            word_ids=wid_inputs,
+            char_seq_ids=cid_inputs,
+            pos_ids=pid_inputs,
+            mask_enc=masks_e,
+            lengths=lengths,
+            sentences=sentences,
         )
 
 
@@ -328,19 +289,19 @@ def iterate_batch(
     data_size: int,
     batch_size: int,
 ) -> Generator[TensorData, None, None]:
-    lengths = data.LENGTH
+    lengths = data.lengths
 
     for idx in range(0, data_size, batch_size):
         batch_slice = slice(idx, idx + batch_size)
         batch_lengths = lengths[batch_slice]
-        batch_length = batch_lengths.max().item()
+        batch_length = max(batch_lengths)
         yield TensorData(
-            WORD=torch.from_numpy(data.WORD[batch_slice, :batch_length]),
-            CHAR=torch.from_numpy(data.CHAR[batch_slice, :batch_length]),
-            POS=torch.from_numpy(data.POS[batch_slice, :batch_length]),
-            MASK_ENC=torch.from_numpy(data.MASK_ENC[batch_slice, :batch_length]),
-            LENGTH=torch.from_numpy(batch_lengths),
-            FORM=data.FORM[batch_slice],
-            LEMMA=data.LEMMA[batch_slice],
-            META=data.META[batch_slice],
+            word_ids=torch.from_numpy(data.word_ids[batch_slice, :batch_length]),
+            char_seq_ids=torch.from_numpy(
+                data.char_seq_ids[batch_slice, :batch_length]
+            ),
+            pos_ids=torch.from_numpy(data.pos_ids[batch_slice, :batch_length]),
+            mask_enc=torch.from_numpy(data.mask_enc[batch_slice, :batch_length]),
+            lengths=batch_lengths,
+            sentences=data.sentences[batch_slice],
         )

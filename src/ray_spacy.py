@@ -9,6 +9,13 @@ from parse.utils import get_parser
 if __name__ == "__main__":
     parser = get_parser("**/*.xmi.bz2")
 
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Validate the output, remove invalid sentences.",
+        default=False,
+    )
+
     lang_map = {
         "en": "en_core_web_sm",
         "de": "de_core_news_sm",
@@ -30,13 +37,17 @@ if __name__ == "__main__":
     if args.num_gpu:
         actors.extend(
             SpacyActor.options(num_cpus=args.scale_cpu, num_gpus=args.scale_gpu).remote(
-                language
+                language,
+                validate=args.validate,
             )
             for _ in range(args.num_gpu)
         )
     if args.num_cpu:
         actors.extend(
-            SpacyActor.options(num_cpus=args.scale_cpu, num_gpus=0).remote(language)
+            SpacyActor.options(num_cpus=args.scale_cpu, num_gpus=0).remote(
+                language,
+                validate=args.validate,
+            )
             for _ in range(args.num_cpu)
         )
     pool = ActorPool(actors)

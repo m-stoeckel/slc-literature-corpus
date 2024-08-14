@@ -3,14 +3,18 @@ import re
 from argparse import ArgumentParser
 from collections import defaultdict
 from dataclasses import dataclass
+from io import TextIOWrapper
 from itertools import islice
 from pathlib import Path
-from typing import Callable, Final, Generator, Iterable, Iterator, TypeVar
+from typing import Callable, Final, Generator, Iterable, Iterator, TextIO, TypeVar
 
 import pgzip
 from conllu import parse
 from conllu.models import SentenceList, Token, TokenList
-from pqdm.processes import pqdm
+from stanza.models.common.doc import Document as StanzaDocument
+from stanza.models.common.doc import Sentence as StanzaSentence
+from stanza.models.common.doc import Token as StanzaToken
+from stanza.utils.conll import CoNLL
 from tqdm import tqdm
 
 
@@ -49,6 +53,13 @@ def get_parser(pattern: str):
         action="store_const",
         const="de",
         dest="language",
+    )
+
+    parser.add_argument(
+        "--tokenize",
+        action="store_true",
+        default=False,
+        help="Tokenize the input text using Stanza's language specific tokenizer.",
     )
 
     parser.add_argument(
@@ -139,13 +150,57 @@ class SentenceValidator:
 
 class ConllFileHelper:
     @classmethod
-    def read(cls, path: Path) -> SentenceList:
-        with pgzip.open(path, "rt", encoding="utf-8") as fp:
+    def read_conllu(cls, path: Path) -> SentenceList:
+        with auto_open(path, "rt", encoding="utf-8") as fp:
             return parse(fp.read())  # type: ignore
 
     @classmethod
-    def read_list(cls, path: Path) -> list:
-        return [list(sentence) for sentence in cls.read(path)]
+    def read_stanza(cls, path: Path) -> StanzaDocument:
+        with auto_open(path, "rt", encoding="utf-8") as fp:
+            content = fp.read()
+
+        if not content.strip():
+            return StanzaDocument([], text="")
+
+        document = CoNLL.conll2doc(input_str=content)
+
+        # Set sentence.text field and corresponding comment, if missing
+        for sentence in document.sentences:
+            sentence: StanzaSentence
+
+            text_comment: str | None = next(
+                filter(lambda comment: comment.startswith("# text"), sentence.comments),
+                None,
+            )
+            if not sentence.text:
+                if text_comment:
+                    sentence.text = text_comment.removeprefix("# text =").strip()
+                else:
+                    sentence.text = stanza_sentence_to_str(sentence)
+                    sentence.add_comment(f"text = {sentence.text}")
+            elif not text_comment:
+                sentence.add_comment(f"text = {sentence.text}")
+
+        # Set document.text field, if missing
+        if not document.text:
+            document.text = "\n\n".join(
+                sentence.text for sentence in document.sentences
+            )
+
+        return document
+
+    @classmethod
+    def write_stanza(cls, sentences: StanzaDocument, path: Path):
+        with auto_open(path, "wt", encoding="utf-8") as fp:
+            CoNLL.write_doc2conll(sentences, fp)
+
+
+def auto_open(path: str | Path, *args, **kwargs) -> TextIO | TextIOWrapper:
+    match Path(path).name.split("."):
+        case [*_, "gz"]:
+            return pgzip.open(path, *args, **kwargs)  # type: ignore
+        case _:
+            return open(path, *args, **kwargs)
 
 
 def conll_space_after_(token: Token | dict) -> str:
@@ -193,7 +248,7 @@ def handle_contractions(sentence: TokenList, expand=True) -> TokenList:
     return tokenlist
 
 
-def tokenlist_to_str(
+def conllu_tokenlist_to_str(
     sentence: TokenList,
     tokenized=False,
     expand_contractions=True,
@@ -217,6 +272,47 @@ def tokenlist_to_str(
     if tokenized:
         return " ".join(token["form"] for token in sentence)
     return "".join(conll_space_after_(token) for token in sentence)
+
+
+def stanza_sentence_to_str(
+    sentence: StanzaSentence,
+    use_words: bool = False,
+    override_whitespace: bool = False,
+    tokenized: bool = False,
+) -> str:
+    """
+    Convert a StanzaSentence to a string.
+
+    Args:
+        sentence (StanzaSentence): The sentence to convert.
+        use_words (bool, optional): If True, will use `Word`s instead of `Token`s (which expands multi-word expressions).
+            Defaults to False.
+        override_whitespace (bool, optional): If True, tokens will be separated by a regular whitespace.
+            Otherwise, use the `space_before` and `space_after` fields of the tokens.
+            Defaults to False.
+        tokenized (bool, optional): If True, place a space after each token. Takes precedence over `override_whitespace`.
+            Defaults to False.
+
+    Returns:
+        str: The sentence text as a string.
+    """
+    buffer = []
+    for token in sentence.tokens:
+        token: StanzaToken
+        if token.spaces_before and not tokenized:
+            buffer.append(" " if override_whitespace else token.spaces_before)
+
+        if use_words:
+            buffer.append(" ".join(word.text for word in token.words))
+        else:
+            buffer.append(token.text)
+
+        if tokenized:
+            buffer.append(" ")
+        elif token.spaces_after:
+            buffer.append(" " if override_whitespace else token.spaces_after)
+
+    return "".join(buffer).strip()
 
 
 def sample_from_conllu(
@@ -276,7 +372,7 @@ def sample_from_conllu(
         for file in tqdm(group, desc="Loading", position=2, leave=False):
             file_names.append(file.stem)
 
-            document = ConllFileHelper.read(file)
+            document = ConllFileHelper.read_conllu(file)
             documents.append(document)
 
             random.seed(seed)
@@ -326,7 +422,9 @@ def sample_from_conllu(
                         sentence.metadata["sent_id"] = (counter := counter + 1)
                         sentence.metadata["text"] = sentence.metadata.get(
                             "text",
-                            tokenlist_to_str(sentence, expand_contractions=False),
+                            conllu_tokenlist_to_str(
+                                sentence, expand_contractions=False
+                            ),
                         )
 
                         sentences.append(sentence)

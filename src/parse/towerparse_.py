@@ -1,58 +1,37 @@
-import logging
 import sys
 from pathlib import Path
-from typing import Final, Literal, Optional
+from typing import Final, Literal
 
-import pgzip
 import torch
-from conllu import Token, TokenList
-from stanza import Pipeline
-from stanza.pipeline.core import DownloadMethod
+from stanza.models.common.doc import Document, Word
 
-from parse.abc import ParserABC
-from parse.utils import (
-    EMPTY_CONLLU_TOKEN,
-    ConllFileHelper,
-    handle_contractions,
-    tokenlist_to_str,
-)
+from parse.stanza_ import ParserWithStanzaPreProcessor
+from parse.utils import ConllFileHelper
 from towerparse.tower import TowerParser
 
 BASE_PATH: Final[Path] = Path.cwd().parent / "models/towerparse/"
 
 
-class TowerParseRunner(ParserABC):
-    tokenizer: Optional[Pipeline] = None
-
+class TowerParseRunner(ParserWithStanzaPreProcessor):
     def __init__(
         self,
         language: Literal["en", "de"] = "en",
-        device: str | torch.device = "cpu",
         batch_size: int = 128,
         base_path: Path = BASE_PATH,
-        tokenize: bool = True,
+        preprocess: bool = True,
+        device: str | torch.device = "cpu",
     ):
-        device = torch.device(device)
-        if device.type == "cuda" and not torch.cuda.is_available():
-            raise ValueError(f"device := {device}, but no GPU is available")
-
+        super().__init__(
+            language=language,
+            preprocess=preprocess,
+            device=device,
+        )
         self.batch_size = batch_size
-        if tokenize:
-            self.tokenizer = Pipeline(
-                lang=language,
-                processors="tokenize,mwt",
-                tokenize_no_ssplit=True,
-                download_method=DownloadMethod.REUSE_RESOURCES,
-                device="cpu",
-                depparse_batch_size=batch_size,
-            )
-
-        self.lang = language
         self._base_path = base_path
-        self.nlp = TowerParser(self._get_model_path(), device=device)
+        self.nlp = TowerParser(self._get_model_path(), device=self.device)
 
     def _get_model_path(self) -> Path:
-        match self.lang:
+        match self.language:
             case "en":
                 model_path = Path(self._base_path / "UD_English-EWT")
             case "de":
@@ -67,59 +46,29 @@ class TowerParseRunner(ParserABC):
         return model_path
 
     def parse(self, path: Path, out: Path):
-        sentences = ConllFileHelper.read(path)
-        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        document: Document = self.read(path)
+        tokens = [
+            [word.text for word in sentence.words] for sentence in document.sentences
+        ]
 
-        if self.tokenizer is not None:
-            tokens: list[list[str]] = [
-                [
-                    token.text
-                    for token in self.tokenizer(
-                        tokenlist_to_str(sentence).replace("ſ", "s")
-                    )
-                    .sentences[0]
-                    .tokens
-                ]
-                for sentence in sentences
-            ]
-        else:
-            tokens = [
-                [
-                    token["form"]
-                    for token in handle_contractions(sentence, expand=True)
-                ]
-                for sentence in sentences
-            ]
-        metadata = [sentence.metadata for sentence in sentences]
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
 
         try:
             predictions = self.nlp.parse(
-                self.lang,
+                self.language,
                 tokens,
                 batch_size=self.batch_size,
             )
 
-            sentences = [
-                TokenList(
-                    [
-                        Token(
-                            EMPTY_CONLLU_TOKEN
-                            | {
-                                "id": index,
-                                "form": token,
-                                "head": governor,
-                                "deprel": relation,
-                            }
-                        )
-                        for (index, token, governor, relation) in prediction
-                    ],
-                    metadata=meta,
-                )
-                for prediction, meta in zip(predictions, metadata)
-            ]
+            for sentence, prediction in zip(document.sentences, predictions):
+                for word, (_index, _token, governor, relation) in zip(
+                    sentence.words, prediction
+                ):
+                    word: Word
+                    word.head = governor
+                    word.deprel = relation
 
-            with pgzip.open(out, "wt", encoding="utf-8") as fp:
-                fp.writelines(sentence.serialize() for sentence in sentences)  # type: ignore
+            ConllFileHelper.write_stanza(document, out)
         except IndexError:
             print(tokens, file=sys.stderr)
             raise

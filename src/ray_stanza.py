@@ -13,7 +13,7 @@ if __name__ == "__main__":
         "-b",
         "--batch_size",
         type=int,
-        default=128,
+        default=5000,
     )
 
     args = parser.parse_args()
@@ -38,6 +38,8 @@ if __name__ == "__main__":
                 language,
                 device="cuda",
                 batch_size=args.batch_size,
+                min_sentence_len=args.min_sentence_len,
+                max_sentence_len=args.max_sentence_len,
             )
             for _ in range(args.num_gpu)
         )
@@ -46,6 +48,8 @@ if __name__ == "__main__":
             StanzaActor.options(num_cpus=args.scale_cpu, num_gpus=0).remote(
                 language,
                 batch_size=args.batch_size,
+                min_sentence_len=args.min_sentence_len,
+                max_sentence_len=args.max_sentence_len,
             )
             for _ in range(args.num_cpu)
         )

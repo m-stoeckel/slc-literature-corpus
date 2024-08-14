@@ -1,6 +1,9 @@
 from abc import ABC, abstractmethod
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
+from typing import Literal
+
+import torch
 
 
 class TaskABC(ABC):
@@ -25,6 +28,18 @@ class TaskABC(ABC):
 
 
 class ParserABC(ABC):
+    def __init__(
+        self,
+        language: Literal["en", "de"] = "en",
+        device: str | torch.device = "cpu",
+    ) -> None:
+        super().__init__()
+        self.language = language
+
+        self.device = torch.device(device)
+        if self.device.type == "cuda" and not torch.cuda.is_available():
+            raise ValueError(f"device := {self.device}, but no GPU is available")
+
     @abstractmethod
     def parse(self, path: Path, out: Path):
         raise NotImplementedError

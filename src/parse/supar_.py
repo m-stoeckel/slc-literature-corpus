@@ -1,20 +1,20 @@
 from pathlib import Path
 from typing import Final, Literal
 
-import pgzip
 import torch
-from conllu import TokenList
+from stanza.models.common.doc import Document, Sentence
 from supar import Parser
+from supar.models.dep.biaffine.transform import CoNLLSentence
 from supar.utils.data import Dataset
 from tqdm import tqdm
 
-from parse.abc import ParserABC
-from parse.utils import ConllFileHelper, batched, tokenlist_to_str
+from parse.stanza_ import ParserWithStanzaPreProcessor
+from parse.utils import ConllFileHelper, batched
 
 BASE_PATH: Final[Path] = Path.cwd().parent / "models/"
 
 
-class SuparRunner(ParserABC):
+class SuparRunner(ParserWithStanzaPreProcessor):
     def __init__(
         self,
         arch: Literal["biaffine", "crf2o"] = "biaffine",
@@ -24,15 +24,12 @@ class SuparRunner(ParserABC):
         device: str | torch.device = "cpu",
         quiet: bool = False,
     ):
-        device = torch.device(device)
-        if device.type == "cuda":
-            if not torch.cuda.is_available():
-                raise ValueError("device.type == cuda, but no GPU is available")
-            else:
-                torch.cuda.set_device(device)
+        super().__init__(language=language, device=device)
+
+        if self.device.type == "cuda":
+            torch.cuda.set_device(self.device)
 
         self.arch = arch
-        self.lang = language
         self._base_path = Path(base_path)
 
         self.nlp = Parser.load(self._get_model_path())
@@ -42,10 +39,10 @@ class SuparRunner(ParserABC):
     def _get_model_path(self) -> Path:
         if self.arch not in {"biaffine", "crf2o"}:
             raise ValueError(f"Invalid architecture: {self.arch}")
-        if self.lang not in {"en", "de"}:
-            raise ValueError(f"Invalid language: {self.lang}")
+        if self.language not in {"en", "de"}:
+            raise ValueError(f"Invalid language: {self.language}")
 
-        model_path = Path(self._base_path / f"{self.arch}/{self.lang}/model.pt")
+        model_path = Path(self._base_path / f"{self.arch}/{self.language}/model.pt")
 
         if not model_path.exists():
             raise FileNotFoundError(f"Model not found: {model_path}")
@@ -53,11 +50,15 @@ class SuparRunner(ParserABC):
         return model_path
 
     def parse(self, path: Path, out: Path):
-        sentences = ConllFileHelper.read(path)
-        if not sentences:
-            return False
+        path = Path(path)
+        document: Document = self.read(path)
+        sentences = document.sentences
 
-        annotations = []
+        if not sentences:
+            raise ValueError(f"No sentences found in {path.name}")
+
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+
         with tqdm(
             total=len(sentences),
             desc=f"Parsing: {path.name}",
@@ -68,40 +69,39 @@ class SuparRunner(ParserABC):
             disable=self.quiet,
         ) as tq:
             for batch in batched(sentences, self.batch_size):
-                batch: list[TokenList]
-                texts = [
-                    tokenlist_to_str(
-                        sentence,
-                        tokenized=True,
-                        expand_contractions=True,
-                    )
-                    for sentence in batch
-                ]
+                batch: list[Sentence]
+                texts = [[word.text for word in sentence.words] for sentence in batch]
 
+                # NOTE: we do not set `lang` parameter here, as we are already passing words
                 dataset: Dataset = self.nlp.predict(
                     texts,
-                    lang=self.lang,
+                    lang=None,
                     proj=False,
                     verbose=False,
                 )
 
                 for sentence, prediction in zip(batch, dataset):
-                    sentence: TokenList
+                    sentence: Sentence
+                    prediction: CoNLLSentence
 
-                    prediction_conllu = str(prediction).strip()
+                    arcs = prediction.values[prediction.maps.get("arcs", 6)]
+                    rels = prediction.values[prediction.maps.get("rels", 7)]
 
-                    metadata_str = "\n".join(
-                        f"# {key} = {value}" for key, value in sentence.metadata.items()
-                    )
-                    if metadata_str:
-                        prediction_conllu = "\n".join((metadata_str, prediction_conllu))
-
-                    annotations.append(prediction_conllu)
+                    if prediction.maps.get("tags") is None:
+                        for word, head, deprel in zip(sentence.words, arcs, rels):
+                            word.head = head
+                            word.deprel = deprel
+                    else:
+                        tags = prediction.values[prediction.maps["tags"]]
+                        for word, head, deprel, tag in zip(
+                            sentence.words, arcs, rels, tags
+                        ):
+                            word.head = head
+                            word.deprel = deprel
+                            word.upos = tag
 
                 tq.update(len(batch))
 
-        out.parent.mkdir(parents=True, exist_ok=True)
-        with pgzip.open(out, "wt", encoding="utf-8") as fp:
-            fp.write("\n\n".join(annotations) + "\n")  # type: ignore
+        ConllFileHelper.write_stanza(document, out)
 
         return True
