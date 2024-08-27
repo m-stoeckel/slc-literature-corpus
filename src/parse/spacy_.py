@@ -64,7 +64,7 @@ class File:
         )
 
 
-class SpacyRunner(ParserABC):
+class SpacyParser(ParserABC):
     def __init__(
         self,
         language: Literal["en_core_web_sm", "de_core_news_sm"] = "en_core_web_sm",
@@ -90,10 +90,19 @@ class SpacyRunner(ParserABC):
         self.validate = validate
         self.quiet = quiet
 
-    def parse(self, path: Path, out: Path):
+    @staticmethod
+    def read(path) -> File:
+        return File.from_xml(path)
+
+    @staticmethod
+    def write(content: str, out: Path):
+        with pgzip.open(out, "wt", encoding="utf-8") as fp:
+            fp.write(content)  # type: ignore
+
+    def process(self, path: Path, out: Path):
         out.parent.mkdir(parents=True, exist_ok=True)
 
-        document = File.from_xml(path)
+        document = self.read(path)
 
         conll = []
         for paragraph in tqdm(
@@ -105,20 +114,16 @@ class SpacyRunner(ParserABC):
             smoothing=0,
             disable=self.quiet,
         ):
-            conll.extend(self.run_paragraph(paragraph))
+            conll.extend(self.process_paragraph(paragraph))
 
-        self.write(out, "\n\n".join(conll))
+        self.write("\n\n".join(conll), out)
 
-        return True
+        return path
 
-    def write(self, out: Path, content: str):
-        with pgzip.open(out, "wt", encoding="utf-8") as fp:
-            fp.write(content)  # type: ignore
-
-    def run_paragraph(self, paragraph: str) -> Generator[str, None, None]:
+    def process_paragraph(self, paragraph: str) -> Generator[str, None, None]:
         paragraph = paragraph.replace("\n", " ")
 
-        doc: Doc = self.nlp(paragraph)
+        doc: Doc = self.parse(paragraph)
 
         # Add a None to the end of the iterator to include the last sentence if it ends with a semicolon.
         it = itertools.chain(doc.sents, (None,))
@@ -149,3 +154,6 @@ class SpacyRunner(ParserABC):
                 conll_string: str = sentence._.conll_str
                 if conll_string is not None:
                     yield conll_string.strip()
+
+    def parse(self, paragraph: str) -> Doc:
+        return self.nlp(paragraph)

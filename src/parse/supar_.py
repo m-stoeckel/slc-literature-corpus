@@ -2,19 +2,19 @@ from pathlib import Path
 from typing import Final, Literal
 
 import torch
-from stanza.models.common.doc import Document, Sentence
+from stanza.models.common.doc import Sentence
 from supar import Parser
 from supar.models.dep.biaffine.transform import CoNLLSentence
 from supar.utils.data import Dataset
 from tqdm import tqdm
 
 from parse.stanza_ import ParserWithStanzaPreProcessor
-from parse.utils import ConllFileHelper, batched
+from parse.utils import batched
 
 BASE_PATH: Final[Path] = Path.cwd().parent / "models/"
 
 
-class SuparRunner(ParserWithStanzaPreProcessor):
+class SuparParser(ParserWithStanzaPreProcessor):
     def __init__(
         self,
         arch: Literal["biaffine", "crf2o"] = "biaffine",
@@ -49,15 +49,14 @@ class SuparRunner(ParserWithStanzaPreProcessor):
 
         return model_path
 
-    def parse(self, path: Path, out: Path):
-        path = Path(path)
-        document: Document = self.read(path)
-        sentences = document.sentences
+    def process(self, path: Path, out: Path):
+        path, out = Path(path), Path(out)
+
+        document, filtered = super().pre_process(path)
+        sentences: list[Sentence] = filtered.sentences
 
         if not sentences:
             raise ValueError(f"No sentences found in {path.name}")
-
-        Path(out).parent.mkdir(parents=True, exist_ok=True)
 
         with tqdm(
             total=len(sentences),
@@ -69,15 +68,8 @@ class SuparRunner(ParserWithStanzaPreProcessor):
             disable=self.quiet,
         ) as tq:
             for batch in batched(sentences, self.batch_size):
-                batch: list[Sentence]
-                texts = [[word.text for word in sentence.words] for sentence in batch]
-
-                # NOTE: we do not set `lang` parameter here, as we are already passing words
-                dataset: Dataset = self.nlp.predict(
-                    texts,
-                    lang=None,
-                    proj=False,
-                    verbose=False,
+                dataset: Dataset = self.parse(
+                    [[word.text for word in sentence.words] for sentence in batch]
                 )
 
                 for sentence, prediction in zip(batch, dataset):
@@ -102,6 +94,18 @@ class SuparRunner(ParserWithStanzaPreProcessor):
 
                 tq.update(len(batch))
 
-        ConllFileHelper.write_stanza(document, out)
+        if self.drop_filtered:
+            self.write(filtered, out)
+        else:
+            self.write(document, out)
 
-        return True
+        return path
+
+    def parse(self, texts: list[list[str]]) -> Dataset:
+        # NOTE: we do not set `lang` parameter here, as we are already passing words
+        return self.nlp.predict(
+            texts,
+            lang=None,
+            proj=False,
+            verbose=False,
+        )

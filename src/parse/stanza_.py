@@ -32,16 +32,14 @@ def get_metadata_from_stanza(sentence: Sentence) -> dict[str, str]:
     return metadata
 
 
-class StanzaRunner(ParserABC):
+class StanzaParser(ParserABC):
     def __init__(
         self,
         language: Literal["en", "de"] = "en",
         processors="tokenize,mwt,pos,lemma,depparse",
         device: str | torch.device = "cpu",
-        batch_size: int = 5000,
-        min_sentence_len: int = -1,
-        max_sentence_len: int = -1,
-        drop_filtered: bool = False,
+        batch_size: int = 1024,
+        **kwargs,
     ):
         """
         Initialize a StanzaRunner instance. This class is a wrapper around the Stanza library.
@@ -50,12 +48,12 @@ class StanzaRunner(ParserABC):
             language (Literal[&quot;en&quot;, &quot;de&quot;], optional): The annotation language. Defaults to "en".
             processors (str, optional): The processors to use. Defaults to "tokenize,mwt,pos,lemma,depparse".
             device (str | torch.device, optional): The device to run the pipeline on. Defaults to "cpu".
-            batch_size (int, optional): The batch size for POS and dependency parsing. Defaults to 5000.
+            batch_size (int, optional): The batch size for POS and dependency parsing. Defaults to 1024.
             min_sentence_len (int, optional): The minimum sentence length to retain. Set to -1 (default) to disable.
             max_sentence_len (int, optional): The maximum sentence length to retain. Set to -1 (default) to disable.
             drop_filtered (bool, optional): Whether to drop the filtered sentences. Defaults to False.
         """
-        super().__init__(language=language, device=device)
+        super().__init__(language=language, device=device, **kwargs)
 
         if not processors.startswith("tokenize,mwt"):
             if "tokenize" not in processors:
@@ -68,7 +66,10 @@ class StanzaRunner(ParserABC):
                     f"Expected processors to start with 'tokenize,mwt', got: {processors}"
                 )
         self.processors = processors
-        self.processors_no_tk = processors.removeprefix("tokenize,mwt").strip(",")
+        self.processors_pre = "tokenize,mwt"
+        self.processors_post = (
+            processors.removeprefix("tokenize,mwt").strip().strip(",")
+        )
 
         self.pipeline = Pipeline(
             lang=language,
@@ -79,12 +80,44 @@ class StanzaRunner(ParserABC):
             pos_batch_size=batch_size,
             depparse_batch_size=batch_size,
         )
-        self.min_sentence_len = min_sentence_len
-        self.max_sentence_len = max_sentence_len
-        self.drop_filtered = drop_filtered
 
-    def read(self, path: Path) -> Document:
+    @staticmethod
+    def read(path: Path) -> Document:
         return ConllFileHelper.read_stanza(path)
+
+    @staticmethod
+    def write(document: Document, out: Path) -> None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        ConllFileHelper.write_stanza(document, out)
+
+    def parse(self, document, processors: str | None = None) -> Document:
+        return self.pipeline(document, processors=processors or self.processors)
+
+    def process(self, path: Path | str, out: Path | str):
+        path, out = Path(path), Path(out)
+
+        document, filtered = self.pre_process(path)
+
+        if self.processors_post:
+            self.pipeline(filtered, processors=self.processors_post)
+
+        if self.drop_filtered:
+            self.write(filtered, out)
+        else:
+            self.write(document, out)
+
+        return path
+
+    def pre_process(self, path: Path) -> tuple[Document, Document]:
+        original: Document = self.read(path)
+        document: Document = self.pipeline(original, processors=self.processors_pre)
+
+        for doc_sentence, orig_sentence in zip(document.sentences, original.sentences):
+            doc_sentence._comments = orig_sentence._comments
+
+        filtered: Document = self.filter(document)
+
+        return document, filtered
 
     def filter(
         self,
@@ -117,21 +150,8 @@ class StanzaRunner(ParserABC):
         filtered._count_words()
         return filtered
 
-    def parse(self, path: Path, out: Path):
-        document: Document = self.pipeline(self.read(path), processors="tokenize,mwt")
-        filtered: Document = self.filter(document)
 
-        if self.processors_no_tk:
-            self.pipeline(filtered, processors=self.processors_no_tk)
-
-        out.parent.mkdir(parents=True, exist_ok=True)
-        if not self.drop_filtered:
-            ConllFileHelper.write_stanza(document, out)
-        else:
-            ConllFileHelper.write_stanza(filtered, out)
-
-
-class ParserWithStanzaPreProcessor(StanzaRunner):
+class ParserWithStanzaPreProcessor(StanzaParser):
     pipeline: Optional[Pipeline] = None
 
     def __init__(
@@ -156,24 +176,18 @@ class ParserWithStanzaPreProcessor(StanzaRunner):
             )
             self.__setattr__ = self.__setattr_safe__
 
-    def read(self, path: Path) -> Document:
-        original = super().read(path)
-
+    def pre_process(self, path: Path) -> tuple[Document, Document]:
         if not self.do_preprocess or self.pipeline is None:
-            return original
+            original: Document = self.read(path)
+            filtered: Document = self.filter(original)
+            return original, filtered
 
-        document = self.pipeline(
-            "\n\n".join(sentence.text for sentence in original.sentences)
-        )
+        document, filtered = super().pre_process(path)
 
-        for sentence, og_sentence in zip(document.sentences, original.sentences):
-            sentence: Sentence
-            for comment in og_sentence.comments:
-                if comment.startswith("# text"):
-                    continue
-                sentence.add_comment(comment)
+        if self.processors_post:
+            self.pipeline(filtered, processors=self.processors_post)
 
-        return document
+        return document, filtered
 
     def __setattr_safe__(self, name: str, value: Any) -> None:
         if name == "pipeline":
@@ -185,5 +199,5 @@ class ParserWithStanzaPreProcessor(StanzaRunner):
                     f"Cannot set pipeline attribute of a {type(self).__name__} instance when preprocessing is enabled! "
                     f"This {type(self).__name__}'s pipeline attribute is currently bound to: {self.pipeline}."
                 )
-            object.__setattr__(self, name, value)
+            return object.__setattr__(self, name, value)
         return super().__setattr__(name, value)

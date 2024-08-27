@@ -1,8 +1,14 @@
 import ray
 
-from parse.towerparse_ import TowerParseRunner
+from parse.ray_.stanza_ import ray_remote_wrapper
+from parse.towerparse_ import TowerParser
 
 
-@ray.remote(num_cpus=1, num_gpus=1, max_restarts=3, max_task_retries=-1)
-class TowerParseActor(TowerParseRunner):
+@ray_remote_wrapper(
+    num_cpus=1,
+    num_gpus=1,
+    max_restarts=-1,
+    max_task_retries=3,
+)
+class TowerParseActor(TowerParser):
     pass

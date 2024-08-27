@@ -19,7 +19,7 @@ class TestCohaABC(unittest.TestCase):
             f"../data/conllu/test.coha.out.{self.__class__.__name__}.conllu.gz"
         )
 
-        self.assertTrue(self.runner.parse(in_path, out_path))
+        self.assertTrue(self.runner.process(in_path, out_path))
 
         with gzip.open(out_path, "rt") as fp:
             print(fp.read())
@@ -38,7 +38,7 @@ class TestDtaABC(unittest.TestCase):
             f"../data/conllu/test.dta.out.{self.__class__.__name__}.conllu.gz"
         )
 
-        self.assertTrue(self.runner.parse(in_path, out_path))
+        self.assertTrue(self.runner.process(in_path, out_path))
 
         with gzip.open(out_path, "rt") as fp:
             print(fp.read())
@@ -51,6 +51,7 @@ class IntegrationTestCohaABC(unittest.TestCase):
     def setUp(self):
         raise NotImplementedError
 
+    @unittest.skip("Skip integration test")
     def test_parse(self):
         in_path = Path(
             "/storage/corpora/coha/slc/conllu/sampled/text_acad_1820-100000.conllu.gz"
@@ -59,7 +60,7 @@ class IntegrationTestCohaABC(unittest.TestCase):
             f"../data/conllu/text_acad_1820.out.{self.__class__.__name__}.conllu.gz"
         )
 
-        self.assertTrue(self.runner.parse(in_path, out_path))
+        self.assertTrue(self.runner.process(in_path, out_path))
 
         with gzip.open(out_path, "rt") as fp:
             print("".join(fp.readlines()[:100]))

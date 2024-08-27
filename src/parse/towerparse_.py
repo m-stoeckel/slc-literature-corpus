@@ -2,33 +2,31 @@ import sys
 from pathlib import Path
 from typing import Final, Literal
 
-import torch
-from stanza.models.common.doc import Document, Word
+from stanza.models.common.doc import Word
 
 from parse.stanza_ import ParserWithStanzaPreProcessor
-from parse.utils import ConllFileHelper
-from towerparse.tower import TowerParser
+from towerparse.tower import TowerParser as TowerParserModel
 
 BASE_PATH: Final[Path] = Path.cwd().parent / "models/towerparse/"
 
 
-class TowerParseRunner(ParserWithStanzaPreProcessor):
+class TowerParser(ParserWithStanzaPreProcessor):
     def __init__(
         self,
         language: Literal["en", "de"] = "en",
         batch_size: int = 128,
         base_path: Path = BASE_PATH,
         preprocess: bool = True,
-        device: str | torch.device = "cpu",
+        **kwargs,
     ):
         super().__init__(
             language=language,
             preprocess=preprocess,
-            device=device,
+            **kwargs,
         )
         self.batch_size = batch_size
         self._base_path = base_path
-        self.nlp = TowerParser(self._get_model_path(), device=self.device)
+        self.nlp = TowerParserModel(self._get_model_path(), device=self.device)
 
     def _get_model_path(self) -> Path:
         match self.language:
@@ -45,32 +43,31 @@ class TowerParseRunner(ParserWithStanzaPreProcessor):
         print(f"Loding model from {model_path}")
         return model_path
 
-    def parse(self, path: Path, out: Path):
-        document: Document = self.read(path)
-        tokens = [
-            [word.text for word in sentence.words] for sentence in document.sentences
-        ]
+    def process(self, path: Path, out: Path):
+        document, filtered = super().pre_process(path)
 
-        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        predictions = self.parse(
+            [[word.text for word in sentence.words] for sentence in filtered.sentences]
+        )
 
-        try:
-            predictions = self.nlp.parse(
-                self.language,
-                tokens,
-                batch_size=self.batch_size,
-            )
+        for sentence, prediction in zip(filtered.sentences, predictions):
+            for word, (_index, _token, governor, relation) in zip(
+                sentence.words, prediction
+            ):
+                word: Word
+                word.head = governor
+                word.deprel = relation
 
-            for sentence, prediction in zip(document.sentences, predictions):
-                for word, (_index, _token, governor, relation) in zip(
-                    sentence.words, prediction
-                ):
-                    word: Word
-                    word.head = governor
-                    word.deprel = relation
+        if self.drop_filtered:
+            self.write(filtered, out)
+        else:
+            self.write(document, out)
 
-            ConllFileHelper.write_stanza(document, out)
-        except IndexError:
-            print(tokens, file=sys.stderr)
-            raise
+        return path
 
-        return True
+    def parse(self, tokens: list[list[str]]) -> list[list[tuple[int, str, int, str]]]:
+        return self.nlp.parse(
+            self.language,
+            tokens,
+            batch_size=self.batch_size,
+        )

@@ -83,34 +83,35 @@ class TensorData:
         return self
 
 
-class StackPointerRunner(ParserWithStanzaPreProcessor):
+class StackPointerParser(ParserWithStanzaPreProcessor):
     def __init__(
         self,
         language: Literal["en", "de"] = "en",
         batch_size: int = 128,
         beam: int = 1,
-        base_path: Path = BASE_PATH,
+        base_path: Path | None = None,
         quiet: bool = False,
         preprocess: bool = True,
         device: str | torch.device = "cpu",
         **kwargs,
     ):
+        kwargs = {
+            "processors": "tokenize,mwt,pos,lemma",
+            "preprocess_device": device,
+            "batch_size": kwargs.pop("pos_batch_size", 1024),
+        } | kwargs
+
         super().__init__(
             language=language,
             preprocess=preprocess,
             device=device,
-            **(
-                {
-                    "processors": "tokenize,mwt,pos,lemma",
-                    "preprocess_device": device,
-                }
-                | kwargs
-            ),
+            **kwargs,
         )
 
         self.batch_size = batch_size
         self.beam = beam
         self.quiet = quiet
+        base_path = Path(base_path or BASE_PATH)
 
         model_dir = Path(base_path) / language
         for sub in ("alphabets", "config.json", "model.pt"):
@@ -157,11 +158,10 @@ class StackPointerRunner(ParserWithStanzaPreProcessor):
         )
         self.nlp.eval()
 
-    def parse(self, path: Path, out: Path):
-        document, datapoints = self.read(path)
+    def process(self, path: Path, out: Path):
+        document, filtered = self.pre_process(path)
+        datapoints = self.prepare(filtered)
 
-        out.parent.mkdir(parents=True, exist_ok=True)
-        # annotated = []  # FIXME: Check if this works
         with tqdm(
             total=len(datapoints),
             desc=f"Parsing: {path.name}",
@@ -197,19 +197,20 @@ class StackPointerRunner(ParserWithStanzaPreProcessor):
                     ):
                         word: StanzaWord
                         word.head = governor
-                        word.deprel = relation
+                        word.deprel = self.type_alphabet.get_instance(relation)
 
                     tq.update(batch.word_ids.size(0))
 
-            ConllFileHelper.write_stanza(document, out)
+        if self.drop_filtered:
+            self.write(filtered, out)
+        else:
+            self.write(document, out)
 
-        return True
+        return path
 
-    def read(self, path: Path) -> tuple[StanzaDocument, list[DataPoint]]:
-        document: StanzaDocument = super().read(path)
-
+    def prepare(self, filtered: StanzaDocument) -> list[DataPoint]:
         data_points: list[DataPoint] = []
-        for sentence in document.sentences:
+        for sentence in filtered.sentences:
             dp = DataPoint(
                 word_ids=[self.word_alphabet.get_index(ROOT)],
                 char_seq_ids=[[self.char_alphabet.get_index(ROOT_CHAR)]],
@@ -231,7 +232,8 @@ class StackPointerRunner(ParserWithStanzaPreProcessor):
 
                 dp.pos_ids.append(self.pos_alphabet.instance2index.get(word.xpos, 0))
             data_points.append(dp)
-        return document, data_points
+
+        return data_points
 
     def stack(
         self,

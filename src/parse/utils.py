@@ -6,7 +6,16 @@ from dataclasses import dataclass
 from io import TextIOWrapper
 from itertools import islice
 from pathlib import Path
-from typing import Callable, Final, Generator, Iterable, Iterator, TextIO, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    Final,
+    Generator,
+    Iterable,
+    Iterator,
+    TextIO,
+    TypeVar,
+)
 
 import pgzip
 from conllu import parse
@@ -16,6 +25,22 @@ from stanza.models.common.doc import Sentence as StanzaSentence
 from stanza.models.common.doc import Token as StanzaToken
 from stanza.utils.conll import CoNLL
 from tqdm import tqdm
+
+T = TypeVar("T", bound=type)
+
+
+def with_typehint(baseclass: T) -> T:
+    """
+    Useful function to make mixins with baseclass typehint
+
+    ```
+    class ReadonlyMixin(with_typehint(BaseAdmin)):
+        ...
+    ```
+    """
+    if TYPE_CHECKING:
+        return baseclass
+    return object
 
 
 def get_parser(pattern: str):

@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, TypeVar
 
 import torch
 
@@ -27,11 +27,18 @@ class TaskABC(ABC):
         raise NotImplementedError
 
 
+T_doc = TypeVar("T_doc")
+
+
 class ParserABC(ABC):
     def __init__(
         self,
         language: Literal["en", "de"] = "en",
         device: str | torch.device = "cpu",
+        min_sentence_len: int = -1,
+        max_sentence_len: int = -1,
+        drop_filtered: bool = False,
+        **kwargs,
     ) -> None:
         super().__init__()
         self.language = language
@@ -40,6 +47,27 @@ class ParserABC(ABC):
         if self.device.type == "cuda" and not torch.cuda.is_available():
             raise ValueError(f"device := {self.device}, but no GPU is available")
 
+        self.min_sentence_len = min_sentence_len
+        self.max_sentence_len = max_sentence_len
+        self.drop_filtered = drop_filtered
+
+    @staticmethod
     @abstractmethod
-    def parse(self, path: Path, out: Path):
+    def read(path: Path) -> Any:
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def write(document: Any, path: Path) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def process(self, path: Path, out: Path) -> Path:
+        raise NotImplementedError
+
+    @abstractmethod
+    def filter(
+        self,
+        document: T_doc,
+    ) -> T_doc:
         raise NotImplementedError

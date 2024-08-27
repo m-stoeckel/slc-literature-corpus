@@ -37,7 +37,7 @@ class CoreNlpServer(CoreNLPClient):
 
 class CoreNlpWorker(ParserABC):
     @staticmethod
-    def parse(
+    def process(
         task_queue: Queue,
         result_queue: PriorityQueue,
         port: int = 23023,
