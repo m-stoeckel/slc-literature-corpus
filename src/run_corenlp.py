@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 from parse.abc import TaskABC
 from parse.corenlp_ import CoreNlpServer, CoreNlpWorker
-from parse.utils import ConllFileHelper, tokenlist_to_str
+from parse.utils import ConllFileHelper, conllu_tokenlist_to_str
 
 
 class TqdmQueue(Queue):
@@ -185,7 +185,7 @@ class CoreNlpTask(TaskABC):
         threads: list[threading.Thread] = []
         for _ in range(n_jobs):
             thread = threading.Thread(
-                target=CoreNlpWorker.parse,
+                target=CoreNlpWorker.process,
                 args=(self.task_queue, self.result_queue),
                 kwargs={"port": port},
                 daemon=True,
@@ -201,13 +201,13 @@ class CoreNlpTask(TaskABC):
 
     def __process(self, in_path: Path, out_path: Path):
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        sentences = ConllFileHelper.read(in_path)
+        sentences = ConllFileHelper.read_conllu(in_path)
 
         n_added_sentences = 0
         self.task_queue.reset(total=len(sentences))
         try:
             for idx, sentence in enumerate(sentences, start=1):
-                text: str = tokenlist_to_str(
+                text: str = conllu_tokenlist_to_str(
                     sentence,
                     tokenized=True,
                     expand_contractions=True,

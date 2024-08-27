@@ -4,7 +4,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 from parse.abc import TaskABC
-from parse.spacy_ import SpacyRunner
+from parse.spacy_ import SpacyParser
 
 
 class SpacyTask(TaskABC):
@@ -96,11 +96,11 @@ class SpacyTask(TaskABC):
         parser: bool = False,
         **kwargs,
     ):
-        runner = SpacyRunner(language, parser=parser, validate=True)
+        runner = SpacyParser(language, parser=parser, validate=True)
         for in_path, out_path in zip(
             tqdm(in_paths, desc="Spacy", smoothing=0), out_paths
         ):
-            runner.parse(in_path, out_path)
+            runner.process(in_path, out_path)
 
 
 if __name__ == "__main__":

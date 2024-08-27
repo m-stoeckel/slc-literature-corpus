@@ -4,7 +4,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 from parse.abc import TaskABC
-from parse.supar_ import SuparRunner
+from parse.supar_ import SuparParser
 
 
 class SuparTask(TaskABC):
@@ -142,7 +142,7 @@ class SuparTask(TaskABC):
         device: str = "cpu",
         **kwargs,
     ):
-        runner = SuparRunner(
+        runner = SuparParser(
             arch=arch,
             language=language,
             batch_size=batch_size,
@@ -151,7 +151,7 @@ class SuparTask(TaskABC):
         for in_path, out_path in zip(
             tqdm(in_paths, desc="Supar", smoothing=0, ascii=True), out_paths
         ):
-            runner.parse(in_path, out_path)
+            runner.process(in_path, out_path)
 
 
 if __name__ == "__main__":

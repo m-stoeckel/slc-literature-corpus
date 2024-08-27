@@ -26,6 +26,11 @@ if __name__ == "__main__":
         type=Path,
         default=None,
     )
+    parser.add_argument(
+        "--preprocess",
+        action="store_true",
+        default=False,
+    )
 
     args = parser.parse_args()
 
@@ -52,6 +57,7 @@ if __name__ == "__main__":
                 beam=args.beam,
                 base_path=base_path,
                 device="cuda:0",
+                preprocess=args.preprocess,
             )
             for _ in range(args.num_gpu)
         )
@@ -62,6 +68,8 @@ if __name__ == "__main__":
                 batch_size=args.batch_size,
                 beam=args.beam,
                 base_path=base_path,
+                device="cpu",
+                preprocess=args.preprocess,
             )
             for _ in range(args.num_cpu)
         )
@@ -71,7 +79,7 @@ if __name__ == "__main__":
     list(
         tqdm(
             pool.map_unordered(
-                lambda a, io: a.parse.remote(*io),
+                lambda a, io: a.process.remote(*io),
                 io_paths,
             ),
             total=len(in_paths),

@@ -55,7 +55,7 @@ if __name__ == "__main__":
     list(
         tqdm(
             pool.map_unordered(
-                lambda a, io: a.parse.remote(*io),
+                lambda a, io: a.process.remote(*io),
                 zip(in_paths, out_paths),
             ),
             total=len(in_paths),

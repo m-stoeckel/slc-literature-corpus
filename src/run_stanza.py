@@ -4,7 +4,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 from parse.abc import TaskABC
-from parse.stanza_ import StanzaRunner
+from parse.stanza_ import StanzaParser
 
 
 class StanzaTask(TaskABC):
@@ -119,11 +119,11 @@ class StanzaTask(TaskABC):
         device: str = "cpu",
         **kwargs,
     ):
-        runner = StanzaRunner(language, device=device)
+        runner = StanzaParser(language, device=device)
         for in_path, out_path in zip(
             tqdm(in_paths, desc="Stanza", smoothing=0), out_paths
         ):
-            runner.parse(in_path, out_path)
+            runner.process(in_path, out_path)
 
 
 if __name__ == "__main__":
